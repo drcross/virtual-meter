@@ -1,0 +1,20 @@
+
+# To enable virtual-meter as a service: move this file to /etc/systemd/system/
+# then: sudo systemctl enable virtual-meter.service
+# sudo systemctl start virtual-meter.service
+# watch output using journalctl -f
+
+[Unit] 
+Description=virtualmeter
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python /home/pi/virtual-meter-service.py
+Restart=always
+User=pi
+WorkingDirectory=/home/pi/
+StandardOutput=inherit
+StandardError=inherit
+
+[Install]
+WantedBy=multi-user.target
