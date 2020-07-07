@@ -1,3 +1,5 @@
+
+
 # VIRTUAL METER FOR SOYO SOURCE BRAND POWER INVERTERS
 # User can choose between JSON or MQTT data sources for an inverter command signal. 
 # Comment out/in configuration depending on your use case. Configuration has been tested mostly with MQTT
@@ -13,12 +15,11 @@
 #      threshold (solar_threshold) and the battery is above a specific state of charge (soc_percentage)
 #
 #
-
 import requests #pip install requests
 import time
 import serial #pip install pyserial
 import logging
-from systemd.journal import JournalHandler
+import systemd.journal
 import paho.mqtt.client as mqtt # for MQTT. TO install on python: pip install paho-mqtt
 import threading
 
@@ -34,38 +35,38 @@ byte7 = 8 ## checksum
 
 
 numberOfUnits = 2 # number of inverters in your system
-original_max_output = 250 # Used as a constant maximum output power reference for startup
-maxOutput = 50 # Used as a variable for adaptive power mode
+original_max_output = 400 # Used as a constant maximum output power reference for startup
+maxOutput = 400 # Used as a variable for adaptive power mode
 buffer = -90 # How much of an import buffer in watts you would like, minus values will allow exporting (use cautiously)
-
-serialWrite = serial.Serial('/dev/serial0', 4800, timeout=1) # define serial port on which to output RS485 data
-
+serialWrite = serial.Serial('/dev/ttys000', 4800, timeout=1) # define serial port on which to output RS485 data
 last_call = time.time() # Set global variable for use in the interrupt timer
 outage_counter = 0 # Tracks network connectivity issues
 outage_state = False # Outage state tracking
-
-solar_threshold = 400 # Minimum amount of solar panel watts needed to put the control into high power mode
+high_power_mode = True # If true this allows full output (800 watts per inverter) when the solar panels
+                       # signal they are providing sun above a certain threshold. The signal is sourced with MQTT, implimented here
+                       # as PCM60x
+hp_switch = False # used for high power mode logic
+solar_threshold = 400 # Amount of solar panel watts needed to put the control into high power mode
 soc_percentage = 82 # State of charge percentage below which we will enter medium power mode
-soc_percentage_low = 78 # Below this we enter low power mode
-low_power_watts = 250
+
 
 jsonSource = "http://<IP-ADDR>/feed/get.json?<FEED ID>" #emonCMS json feed for CT clamp 1
 broker_address="192.168.86.248" # MQTT broker address
 
 # Needed for logging data when installed as a systemd service
-log = logging.getLogger('__name__')
-log_fmt = logging.Formatter("%(levelname)s %(message)s")
-log_ch = JournalHandler()
-log_ch.setFormatter(log_fmt)
-log.addHandler(log_ch)
-log.setLevel(logging.INFO)
+#log = logging.getLogger('__name__')
+#log_fmt = logging.Formatter("%(levelname)s %(message)s")
+#log_ch = JournalHandler()
+#log_ch.setFormatter(log_fmt)
+#log.addHandler(log_ch)
+#log.setLevel(logging.INFO)
 
 ############## JSON SECTION BELOW ##########################
 
 def jsonSignal():
     r = requests.get(jsonSource)
     sourceValue = r.json()
-    log.info("signal value from your source= %s", sourceValue)
+    print("signal value from your source= %s", sourceValue)
     return sourceValue
 
 ############## MQTT SECTION BELOW #####################
@@ -74,47 +75,36 @@ def parse_message(client, userdata, message):
     global last_call
     global maxOutput
     global soc_percentage
-    global soc_percentage_low
-    global low_power_watts
-    global solar_threshold
-
     last_call = time.time()
-    signal = int(message.payload.decode("utf-8"))
+    signal = str(message.payload.decode("utf-8"))
     topic = str(message.topic.decode("utf-8"))
     if topic == "emon/emonpi/pcm60x": # sampling the charge controller to see if there is strong solar production
-        if signal >= solar_threshold: # if production is over 300 watts, enter high power mode
-            maxOutput = numberOfUnits*800 # 800 is the maximum sustained watts per unit
-            log.info("PANELS We are in HIGH power mode: %s", maxOutput)
-        elif signal <= solar_threshold:
-            log.info("PANELS We are in MEDIUM power mode: %s", maxOutput)
-            maxOutput = original_max_output
-        log.info("Panel Output= %s", signal)
-
-    if topic == "emon/emonpi/soc":
-        log.info("SOC FIELDS HERE %s", signal)
-        if signal >= soc_percentage:
-            maxOutput = numberOfUnits*800 # 800 is the maximum sustained watts per unit
-            log.info("SOC We are in HIGH power mode: %s", maxOutput)
-        elif signal >= soc_percentage_low:
-            maxOutput = original_max_output
-            log.info("SOC We are in MEDIUM power mode: %s", maxOutput)
-        else:
-            maxOutput = low_power_watts
-            log.info("SOC We are in LOW power mode: %s", maxOutput)
-
+        if int(signal) >= solar_threshold: # if production is over 300 watts, enter high power mode
+            print("We are in HIGH power mode: %s", maxOutput)
+            maxOutput == numberOfUnits*800 # 800 is the maximum sustained watts per unit
+        elif int(signal) <= solar_threshold:
+            print("We are in MEDIUM power mode: %s", maxOutput)
+            maxOutput == original_max_output
+        print("Panel Output= %s", signal)
+    if topic == "emon/emonpi/soc"
+        if int(signal) >= soc_percentage:
+            maxOutput == numberOfUnits*800 # 800 is the maximum sustained watts per unit
+            print("We are in HIGH power mode: %s", maxOutput)
+        elif int(signal) <= soc_percentage:
+            maxOutput == original_max_output
+            print("We are in MEDIUM power mode: %s", maxOutput)
     if topic == "emon/emonpi/power1":
-        log.info("signal value from your source= %s", signal)
         demand = computeDemand(signal)
-        log.info("calculated demand= %s", demand)
+        print("calculated demand= %s", demand)
         simulatedPacket = createPacket(demand)
-        log.info("packet bytes= %s", simulatedPacket)
+        print("packet bytes= %s", simulatedPacket)
         writeToSerial(simulatedPacket)
 
 def on_connect(client, userdata, flags, rc):
     client.subscribe("emon/emonpi/power1")
     client.subscribe("emon/emonpi/pcm60x")
     client.subscribe("emon/emonpi/soc")
-    log.info("connected to MQTT")
+    print("connected to MQTT")
 
 
 
@@ -123,14 +113,14 @@ def timer_fire():
     global outage_counter
     global outage_state
     timer_check = time.time()
-    timer = int(timer_check - last_call)
-    log.info("Interrupt Timer: %s", timer)
-    log.info("Number of Outages: %s", outage_counter)
+    timer = timer_check - last_call
+    print("INTERRUPT TIMER: %s", timer)
+    print("NUMBER OF OUTAGES: %s", outage_counter)
     if timer >= 5: #allowed time since last packet was recieved before entering critical condition.
         if outage_state == False:
             outage_state = True
             outage_counter += 1
-        log.info("NETWORK CONNECTIVITY IS DOWN, ENTERING DEGRADED STATE, SENDING 0 WATTS SIGNAL TO INVERTER")
+        print("NETWORK CONNECTIVITY IS DOWN, ENTERING DEGRADED STATE, SENDING 0 WATTS SIGNAL TO INVERTER")
         simulatedPacket = (0, 0, 8)
         for times in range(5):
             writeToSerial(simulatedPacket)
@@ -164,7 +154,7 @@ def computeDemand(sourceValue):
         demand = 0
         return int(demand) # only demand is required but value is for logs
     else:
-        log.error("Invalid source value")
+        log.warning("Invalid source value")
 
 ########################################
 def createPacket(demand):
@@ -184,8 +174,9 @@ def writeToSerial(packet):
     try:
         bytes = [byte0,byte1,byte2,byte3,packet[0],packet[1],byte6,packet[2]]
         serialWrite.write(bytearray(bytes))
-        log.info("complete decimal packet: %s", bytes)
-        log.info("raw bytearray packet being sent to serial: %s", bytearray(bytes))
+        print("complete decimal packet: %s", bytes)
+        print("raw bytearray packet being sent to serial: %s", bytearray(bytes))
+        print("checksum calc= %s", 264-packet[0]-packet[1])
     except ValueError:
         log.error("Error writing to serial port, check port settings are correct in /dev/ ")
     return packet
@@ -196,9 +187,9 @@ mqttSignal() #uncomment for mqtt/comment for json
 #while True: # this while is not used if using mqtt
 #    signal = jsonSignal()
 #    demand =computeDemand(signal)
-#    log.info("calculated demand based on your parameters= %s", demand)
+#    print("calculated demand based on your parameters= %s", demand)
 #    simulatedPacket = createPacket(demand)
-#    log.info("calculated packet bytes based on demand= %s", simulatedPacket)
+#    print("calculated packet bytes based on demand= %s", simulatedPacket)
 #    writeToSerial(simulatedPacket)
-#    log.info("")
+#    print("")
 #    time.sleep(1) # run four times per second
